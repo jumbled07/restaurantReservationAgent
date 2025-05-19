@@ -45,7 +45,7 @@ pip install -r requirements.txt
 4. Create a `.env` file in the root directory:
 ```env
 GROQ_API_KEY=your_groq_api_key_here
-SECRET_KEY=your_secret_key_here
+SECRET_KEY=your_groq_api_key_here
 ```
 
 5. Start the backend server:
@@ -189,7 +189,7 @@ Would you like to see their full menu or check availability for a specific date?
    - Seamless user experience
 
 2. **For Restaurants**:
-   - Increased visibility
+   - Increased visibility and promotions
    - Better table management
    - Customer preference insights
    - Reduced no-shows
@@ -203,8 +203,8 @@ Would you like to see their full menu or check availability for a specific date?
 
 2. **Long-term**:
    - Mobile app development
-   - Integration with restaurant POS systems
-   - Loyalty program implementation
+   - Multi-language support
+   - Integration with restaurant facing systems
    - Expansion to new markets
 
 ### Competitive Advantage
@@ -212,6 +212,7 @@ Would you like to see their full menu or check availability for a specific date?
 2. **Natural Language Interface**: More intuitive than form-based booking
 3. **Comprehensive Service**: Handles everything from discovery to booking
 4. **User-Centric Design**: Focuses on customer experience and convenience
+5. **User-Oriented Intuition**: Remembers customer reviews and preference to suggest a unique experience
 
 ## 📝 License
 
@@ -220,4 +221,3 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 ## 🤝 Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
-

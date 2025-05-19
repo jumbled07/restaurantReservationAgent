@@ -1,0 +1,16 @@
+[
+  {
+    "id": 1,
+    "name": "john doe",
+    "email": "john.do2e@ai.com",
+    "phone": "123456789",
+    "preferences": {
+      "cuisine": [
+        "Mexican"
+      ],
+      "price_range": "$$",
+      "location": "Bangalore"
+    },
+    "created_at": "2025-05-19T07:14:22.239164"
+  }
+]

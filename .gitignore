@@ -39,9 +39,6 @@ env/
 *.log
 logs/
 
-# Local data
-data/*.json
-!data/sample_*.json
 
 # Streamlit
 .streamlit/
