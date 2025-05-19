@@ -19,6 +19,8 @@ if 'chat_history' not in st.session_state:
     st.session_state.chat_history = []
 if 'show_recommendations' not in st.session_state:
     st.session_state.show_recommendations = True
+if 'show_quick_book' not in st.session_state:
+    st.session_state.show_quick_book = False
 
 def check_backend_health() -> bool:
     """Check if backend server is healthy"""
@@ -70,7 +72,7 @@ def get_user_by_email(email: str) -> Optional[Dict[str, Any]]:
         return None
 
 def create_user(user_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Create a new user"""
+    """Create or look up a user in the backend"""
     try:
         response = requests.post(
             "http://localhost:8000/api/v1/users",
@@ -100,7 +102,7 @@ def display_restaurant_card(restaurant: Dict[str, Any]):
             st.experimental_rerun()
         if st.button("Book Now", key=f"book_{restaurant['id']}"):
             st.session_state.selected_restaurant = restaurant
-            st.session_state.current_step = 'availability'
+            st.session_state.current_step = 'user_info'
             st.experimental_rerun()
     st.divider()
 
@@ -143,101 +145,154 @@ def get_recommendations() -> Dict[str, Any]:
         st.error(f"Error getting recommendations: {str(e)}")
         return None
 
+WELCOME_MESSAGE = {
+    "role": "assistant",
+    "content": """👋 Welcome to the Restaurant Assistant! I can help you:
+
+• Find restaurants by cuisine, location, or price range
+• Get personalized recommendations
+• View menus and make reservations
+• Check for special deals and events
+
+What would you like to do today? You can:
+- Ask for recommendations (e.g., "What are some good Italian restaurants?")
+- Search by cuisine (e.g., "Show me Mexican restaurants")
+- Check for deals (e.g., "Any special offers today?")
+- Make a reservation (e.g., "I want to book a table at [restaurant name]")
+
+Feel free to ask anything!"""
+}
+
+def display_suggested_queries():
+    suggested_queries = [
+        "Show me Italian restaurants",
+        "Any deals today?",
+        "Book a table at La Bella Italia",
+        "Find vegetarian options",
+        "Show top rated restaurants"
+    ]
+    st.markdown("**Quick Suggestions:**")
+    cols = st.columns(len(suggested_queries))
+    for i, query in enumerate(suggested_queries):
+        if cols[i].button(query, key=f"suggestion_{i}"):
+            st.session_state.chat_history.append({
+                "role": "user",
+                "content": query
+            })
+            st.session_state.chat_input_value = ""
+            st.session_state.suggestion_clicked = False
+            st.rerun()
+
+def display_quick_book_form():
+    st.header("Quick Book a Restaurant")
+    restaurants = get_restaurants()
+    restaurant_names = [r["name"] for r in restaurants]
+    selected_name = st.selectbox("Select Restaurant", restaurant_names)
+    restaurant = next((r for r in restaurants if r["name"] == selected_name), None)
+    if not restaurant:
+        st.warning("Please select a restaurant.")
+        return
+    with st.form("quick_book_form"):
+        name = st.text_input("Full Name")
+        email = st.text_input("Email")
+        phone = st.text_input("Phone Number")
+        date = st.date_input("Date")
+        time = st.time_input("Time")
+        party_size = st.number_input("Party Size", min_value=1, max_value=restaurant.get('capacity', 20), value=2)
+        special_requests = st.text_area("Special Requests or Dietary Requirements")
+        submitted = st.form_submit_button("Book Reservation")
+        if submitted:
+            if not all([name, email, phone, date, time, party_size]):
+                st.error("Please fill in all required fields")
+            else:
+                user_data = {
+                    "name": name,
+                    "email": email,
+                    "phone": phone,
+                    "preferences": {},
+                    "special_requests": special_requests
+                }
+                user = create_user(user_data)
+                if user and user.get("id"):
+                    reservation_data = {
+                        "restaurant_id": restaurant["id"],
+                        "user_id": user["id"],
+                        "date": str(date),
+                        "time": str(time),
+                        "party_size": party_size,
+                        "special_requests": special_requests
+                    }
+                    result = make_reservation(reservation_data)
+                    if result:
+                        st.success("Your reservation has been made!")
+                        st.session_state.current_step = "explore"
+                        st.session_state.selected_restaurant = None
+                        st.rerun()
+
+def display_chat_interface():
+    st.subheader("Restaurant Assistant")
+    for message in st.session_state.chat_history:
+        with st.chat_message(message["role"]):
+            st.write(message["content"])
+            # Show Book Now button for mentioned restaurant
+            if message.get("mentioned_restaurant"):
+                restaurant = message["mentioned_restaurant"]
+                if st.button(f"Book Now at {restaurant['name']}", key=f"book_mentioned_{restaurant['name']}"):
+                    st.session_state.selected_restaurant = restaurant
+                    st.session_state.current_step = "reservation_form"
+                    st.rerun()
+            # Show Book Now buttons for recommended restaurants
+            if message.get("recommended_restaurants"):
+                for restaurant in message["recommended_restaurants"]:
+                    if st.button(f"Book Now at {restaurant['name']}", key=f"book_rec_{restaurant['name']}"):
+                        st.session_state.selected_restaurant = restaurant
+                        st.session_state.current_step = "reservation_form"
+                        st.rerun()
+        # Show suggested queries after each assistant message
+        if message["role"] == "assistant":
+            display_suggested_queries()
+
 def process_chat_message(message: str) -> Dict[str, Any]:
     """Process a chat message and get response"""
     try:
+        # Check if the user mentions a specific restaurant
+        restaurants = get_restaurants()
+        mentioned_restaurant = None
+        for restaurant in restaurants:
+            if restaurant["name"].lower() in message.lower():
+                mentioned_restaurant = restaurant
+                break
+        if mentioned_restaurant:
+            return {
+                "response": f"Would you like to book a table at {mentioned_restaurant['name']}?",
+                "mentioned_restaurant": mentioned_restaurant
+            }
+        # Otherwise, get recommendations from backend
         response = requests.post(
             "http://localhost:8000/api/v1/chat",
             json={
                 "message": message,
-                "user_info": st.session_state.user_info
+                "user_info": st.session_state.get("user_info", None)
             },
             timeout=10
         )
         response.raise_for_status()
-        return response.json()
+        result = response.json()
+        # Try to extract recommended restaurants from the response
+        recommended_restaurants = []
+        if result and result.get("response"):
+            for restaurant in restaurants:
+                if restaurant["name"].lower() in result["response"].lower():
+                    recommended_restaurants.append(restaurant)
+        if recommended_restaurants:
+            return {
+                "response": result["response"],
+                "recommended_restaurants": recommended_restaurants
+            }
+        return result
     except Exception as e:
         st.error(f"Error processing message: {str(e)}")
         return None
-
-def display_chat_interface():
-    """Display chat interface with recommendations and booking options"""
-    st.subheader("Restaurant Assistant")
-    
-    # Display chat history using Streamlit's chat components
-    for message in st.session_state.chat_history:
-        with st.chat_message(message["role"]):
-            if message["role"] == "assistant":
-                # Parse the message for restaurant suggestions
-                if "Here are some restaurants" in message["content"] or "Based on your preferences" in message["content"]:
-                    # Split the message into lines
-                    lines = message["content"].split("\n")
-                    for line in lines:
-                        if line.startswith("- "):  # This is a restaurant suggestion
-                            # Extract restaurant name and details
-                            parts = line[2:].split(" (")
-                            if len(parts) >= 1:
-                                restaurant_name = parts[0]
-                                details = parts[1].rstrip(")") if len(parts) > 1 else ""
-                                
-                                # Create columns for the restaurant info and button
-                                col1, col2 = st.columns([3, 1])
-                                with col1:
-                                    st.write(f"**{restaurant_name}** ({details})")
-                                with col2:
-                                    if st.button("Book Now", key=f"book_{restaurant_name}"):
-                                        # Set the restaurant name in the search
-                                        st.session_state.restaurant_name = restaurant_name
-                                        # Move to availability check step
-                                        st.session_state.current_step = "check_availability"
-                                        st.rerun()
-                        else:
-                            st.write(line)
-                else:
-                    st.write(message["content"])
-            else:
-                st.write(message["content"])
-    
-    # Show recommendations if enabled
-    if st.session_state.show_recommendations:
-        with st.chat_message("assistant"):
-            with st.spinner("Getting recommendations..."):
-                recommendations = get_recommendations()
-                if recommendations and recommendations.get("response"):
-                    st.write(recommendations["response"])
-                    st.session_state.chat_history.append({
-                        "role": "assistant",
-                        "content": recommendations["response"]
-                    })
-                    st.session_state.show_recommendations = False
-    
-    # Chat input using Streamlit's chat input
-    if prompt := st.chat_input("Ask about restaurants, deals, or recommendations..."):
-        # Add user message to chat history
-        st.session_state.chat_history.append({
-            "role": "user",
-            "content": prompt
-        })
-        with st.chat_message("user"):
-            st.write(prompt)
-        
-        # Get assistant response
-        with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
-                response = process_chat_message(prompt)
-                if response and response.get("response"):
-                    st.write(response["response"])
-                    st.session_state.chat_history.append({
-                        "role": "assistant",
-                        "content": response["response"]
-                    })
-                    
-                    # If the response suggests getting user preferences
-                    if "preferences" in response["response"].lower() and not st.session_state.user_info:
-                        st.info("Would you like to save your preferences for better recommendations?")
-                        if st.button("Save Preferences"):
-                            st.session_state.current_step = 'user_info'
-                            st.experimental_rerun()
 
 def display_back_button():
     """Display back button based on current step"""
@@ -254,75 +309,185 @@ def display_back_button():
                 st.session_state.current_step = 'user_info'
             st.experimental_rerun()
 
+def make_reservation(reservation_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Create a reservation in the backend"""
+    try:
+        response = requests.post(
+            "http://localhost:8000/api/v1/reservations",
+            json=reservation_data,
+            timeout=10
+        )
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        st.error(f"Error making reservation: {str(e)}")
+        return None
+
+def display_confirm_reservation():
+    st.header("Confirm Your Reservation")
+    restaurant = st.session_state.selected_restaurant
+    user = st.session_state.user_info
+    st.subheader("Reservation Details")
+    st.write(f"Restaurant: {restaurant['name']}")
+    st.write(f"Location: {restaurant['location']}")
+    st.write(f"Cuisine: {restaurant['cuisine']}")
+    st.write(f"Price Range: {restaurant['price_range']}")
+    st.write(f"Party Size: {restaurant.get('party_size', 2)}")
+    st.write(f"Date: {restaurant.get('date', 'Not set')}")
+    st.write(f"Time: {restaurant.get('time', 'Not set')}")
+    st.subheader("Your Information")
+    st.write(f"Name: {user['name']}")
+    st.write(f"Email: {user['email']}")
+    st.write(f"Phone: {user['phone']}")
+    st.write(f"Preferences: {user.get('preferences', {})}")
+    st.write(f"Special Requests: {user.get('special_requests', '')}")
+    if st.button("Confirm Reservation"):
+        reservation_data = {
+            "restaurant_id": restaurant["id"],
+            "user_id": user["id"],
+            "date": restaurant.get("date", ""),
+            "time": restaurant.get("time", ""),
+            "party_size": restaurant.get("party_size", 2),
+            "special_requests": user.get("special_requests", "")
+        }
+        result = make_reservation(reservation_data)
+        if result:
+            st.success("Your reservation has been made!")
+            st.session_state.current_step = "explore"
+            st.session_state.selected_restaurant = None
+            st.session_state.user_info = None
+            st.rerun()
+    if st.button("Cancel Reservation"):
+        st.session_state.current_step = "explore"
+        st.session_state.selected_restaurant = None
+        st.session_state.user_info = None
+        st.rerun()
+
+def display_user_info_form():
+    st.header("Complete Your Reservation")
+    with st.form("user_info_form"):
+        name = st.text_input("Full Name")
+        email = st.text_input("Email")
+        phone = st.text_input("Phone Number")
+        cuisine_types = st.multiselect(
+            "Preferred Cuisine Types",
+            ["Italian", "Japanese", "Indian", "Mexican", "American", "Chinese", "Thai", "French"]
+        )
+        price_range = st.select_slider(
+            "Preferred Price Range",
+            options=["$", "$$", "$$$", "$$$$"],
+            value="$$"
+        )
+        location = st.text_input("Preferred Location")
+        special_requests = st.text_area("Special Requests or Dietary Requirements")
+        submitted = st.form_submit_button("Submit Reservation Details")
+        if submitted:
+            if not all([name, email, phone]):
+                st.error("Please fill in all required fields")
+            else:
+                user_data = {
+                    "name": name,
+                    "email": email,
+                    "phone": phone,
+                    "preferences": {
+                        "cuisine_types": cuisine_types,
+                        "price_range": price_range,
+                        "location": location
+                    },
+                    "special_requests": special_requests
+                }
+                user = create_user(user_data)
+                if user:
+                    st.session_state.user_info = user
+                    st.session_state.current_step = "confirm_reservation"
+                    st.experimental_rerun()
+
+def display_reservation_form():
+    st.header("Book Your Reservation")
+    restaurant = st.session_state.selected_restaurant
+    st.subheader(f"Restaurant: {restaurant['name']}")
+    with st.form("reservation_form"):
+        name = st.text_input("Full Name")
+        email = st.text_input("Email")
+        phone = st.text_input("Phone Number")
+        cuisine_types = st.multiselect(
+            "Preferred Cuisine Types",
+            ["Italian", "Japanese", "Indian", "Mexican", "American", "Chinese", "Thai", "French"]
+        )
+        price_range = st.select_slider(
+            "Preferred Price Range",
+            options=["$", "$$", "$$$", "$$$$"],
+            value="$$"
+        )
+        location = st.text_input("Preferred Location")
+        date = st.date_input("Date")
+        time = st.time_input("Time")
+        party_size = st.number_input("Party Size", min_value=1, max_value=restaurant.get('capacity', 20), value=2)
+        special_requests = st.text_area("Special Requests or Dietary Requirements")
+        submitted = st.form_submit_button("Book Reservation")
+        if submitted:
+            if not all([name, email, phone, date, time, party_size]):
+                st.error("Please fill in all required fields")
+            else:
+                user_data = {
+                    "name": name,
+                    "email": email,
+                    "phone": phone,
+                    "preferences": {
+                        "cuisine_types": cuisine_types,
+                        "price_range": price_range,
+                        "location": location
+                    },
+                    "special_requests": special_requests
+                }
+                user = create_user(user_data)
+                if user and user.get("id"):
+                    reservation_data = {
+                        "restaurant_id": restaurant["id"],
+                        "user_id": user["id"],
+                        "date": str(date),
+                        "time": str(time),
+                        "party_size": party_size,
+                        "special_requests": special_requests
+                    }
+                    result = make_reservation(reservation_data)
+                    if result:
+                        st.success("Your reservation has been made!")
+                        st.session_state.current_step = "explore"
+                        st.session_state.selected_restaurant = None
+                        st.rerun()
+
 def main():
-    # Set page config with custom favicon
     st.set_page_config(
         page_title="Restaurant Reservation System",
-        page_icon="🍽️",  # Using a plate with fork and knife emoji as favicon
+        page_icon="🍽️",
         layout="wide"
     )
-    
     st.title("Restaurant Reservation System")
-    
-    # Initialize session state variables if they don't exist
+    if "chat_history" not in st.session_state or not st.session_state.chat_history:
+        st.session_state.chat_history = [WELCOME_MESSAGE]
     if "current_step" not in st.session_state:
         st.session_state.current_step = "explore"
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = []
-        # Add initial recommendations
-        st.session_state.chat_history.append({
-            "role": "assistant",
-            "content": """Welcome! I can help you find and book restaurants. Here are some current special deals:
-
-- The Italian Bistro: 20% off on weekdays (Italian, $$, Downtown)
-- Sushi Master: Happy Hour 5-7 PM (Japanese, $$$, Westside)
-- Spice Garden: Family Dinner Special (Indian, $$, Eastside)
-
-Would you like to know more about any of these restaurants or would you prefer different recommendations?"""
-        })
-    if "restaurant_name" not in st.session_state:
-        st.session_state.restaurant_name = ""
-    if "user_info" not in st.session_state:
-        st.session_state.user_info = None
-    if "show_recommendations" not in st.session_state:
-        st.session_state.show_recommendations = True
     if "selected_restaurant" not in st.session_state:
         st.session_state.selected_restaurant = None
+    if "user_info" not in st.session_state:
+        st.session_state.user_info = None
     if "viewing_menu" not in st.session_state:
         st.session_state.viewing_menu = False
-    if "reservation_date" not in st.session_state:
-        st.session_state.reservation_date = None
-    if "reservation_time" not in st.session_state:
-        st.session_state.reservation_time = None
-    if "party_size" not in st.session_state:
-        st.session_state.party_size = None
-    if "availability_checked" not in st.session_state:
-        st.session_state.availability_checked = False
-    if "user_email" not in st.session_state:
-        st.session_state.user_email = None
-    if "existing_user" not in st.session_state:
-        st.session_state.existing_user = None
-    if "reservation_confirmed" not in st.session_state:
-        st.session_state.reservation_confirmed = False
-
-    # Check backend health
-    if not check_backend_health():
-        st.error("Backend server is not available. Please ensure the server is running.")
-        return
-
-    # Display chat interface at the top
+    if "show_quick_book" not in st.session_state:
+        st.session_state.show_quick_book = False
     display_chat_interface()
-    
-    # Display back button
-    display_back_button()
-    
-    st.divider()
-
-    # Step 1: Restaurant Exploration
+    # Quick Book button at the top
+    if st.button("Quick Book a Restaurant", key="quick_book_top"):
+        st.session_state.show_quick_book = True
+        st.session_state.current_step = "quick_book_form"
+        st.experimental_rerun()
+    if st.session_state.current_step == 'quick_book_form':
+        display_quick_book_form()
+        return
+    # Explore Restaurants section
     if st.session_state.current_step == 'explore':
         st.header("Explore Restaurants")
-        
-        # Filters
         col1, col2, col3 = st.columns(3)
         with col1:
             cuisine = st.selectbox(
@@ -336,8 +501,6 @@ Would you like to know more about any of these restaurants or would you prefer d
             )
         with col3:
             location = st.text_input("Location")
-        
-        # Apply filters
         filters = {}
         if cuisine != "All":
             filters["cuisine"] = cuisine
@@ -345,178 +508,50 @@ Would you like to know more about any of these restaurants or would you prefer d
             filters["price_range"] = price_range
         if location:
             filters["location"] = location
-        
-        # Get and display restaurants
         restaurants = get_restaurants(filters)
         if not restaurants:
             st.info("No restaurants found matching your criteria. Try adjusting the filters.")
         else:
             for restaurant in restaurants:
                 display_restaurant_card(restaurant)
-
-    # Step 2: View Menu
+    # View Menu
     elif st.session_state.current_step == 'view_menu':
         display_menu(st.session_state.selected_restaurant)
-
-    # Step 3: Restaurant Availability Check
-    elif st.session_state.current_step == 'availability':
-        st.header("Check Availability")
-        
-        # Show restaurant details
-        st.subheader("Restaurant Details")
-        restaurant = st.session_state.selected_restaurant
-        st.write(f"Name: {restaurant['name']}")
-        st.write(f"Cuisine: {restaurant['cuisine']}")
-        st.write(f"Location: {restaurant['location']}")
-        
-        # Availability form
-        col1, col2 = st.columns(2)
-        with col1:
-            date = st.date_input("Date", min_value=datetime.now().date())
-            time = st.time_input("Time")
-        with col2:
-            party_size = st.number_input("Party Size", min_value=1, max_value=restaurant['capacity'], value=2)
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("Check Availability"):
-                with st.spinner("Checking availability..."):
-                    date_str = date.strftime("%Y-%m-%d")
-                    time_str = time.strftime("%H:%M")
-                    response = check_restaurant_availability(
-                        restaurant['name'], date_str, time_str, party_size
-                    )
-                    
-                    if response and response.get("response"):
-                        st.session_state.selected_restaurant.update({
-                            "date": date_str,
-                            "time": time_str,
-                            "party_size": party_size
-                        })
-                        st.session_state.availability_confirmed = True
-                        st.success(response["response"])
-                        st.session_state.current_step = 'user_info'
-                        st.experimental_rerun()
-
-    # Step 4: User Information (only if availability is confirmed)
-    elif st.session_state.current_step == 'user_info' and st.session_state.availability_confirmed:
-        st.header("Complete Your Reservation")
-        
-        # Show reservation details
-        st.subheader("Reservation Details")
-        restaurant = st.session_state.selected_restaurant
-        st.write(f"Restaurant: {restaurant['name']}")
-        st.write(f"Date: {restaurant['date']}")
-        st.write(f"Time: {restaurant['time']}")
-        st.write(f"Party Size: {restaurant['party_size']}")
-        
-        # If user is not logged in, show login/registration form
-        if not st.session_state.user_info:
-            st.subheader("Please provide your information")
-            
-            # First try to get user by email
-            email = st.text_input("Email")
-            if email and st.button("Check Existing Account"):
-                user = get_user_by_email(email)
-                if user:
-                    st.session_state.user_info = user
-                    st.success("Welcome back! Your account has been found.")
-                    st.session_state.current_step = 'confirm_reservation'
-                    st.experimental_rerun()
-                else:
-                    st.info("No existing account found. Please complete the registration form.")
-            
-            # Registration form
-            with st.form("user_info_form"):
-                name = st.text_input("Full Name")
-                phone = st.text_input("Phone Number")
-                
-                st.subheader("Preferences")
-                cuisine_types = st.multiselect(
-                    "Preferred Cuisine Types",
-                    ["Italian", "Japanese", "Indian", "Mexican", "American", "Chinese", "Thai", "French"]
-                )
-                price_range = st.select_slider(
-                    "Preferred Price Range",
-                    options=["$", "$$", "$$$", "$$$$"],
-                    value="$$"
-                )
-                location = st.text_input("Preferred Location")
-                
-                special_requests = st.text_area("Special Requests or Dietary Requirements")
-                
-                submitted = st.form_submit_button("Complete Registration")
-                if submitted:
-                    if not all([name, email, phone]):
-                        st.error("Please fill in all required fields")
-                    else:
-                        user_data = {
-                            "name": name,
-                            "email": email,
-                            "phone": phone,
-                            "preferences": {
-                                "cuisine_types": cuisine_types,
-                                "price_range": price_range,
-                                "location": location
-                            },
-                            "special_requests": special_requests
-                        }
-                        
-                        user = create_user(user_data)
-                        if user:
-                            st.session_state.user_info = user
-                            st.success("Account created successfully!")
-                            st.session_state.current_step = 'confirm_reservation'
-                            st.experimental_rerun()
-
-    # Step 5: Confirm Reservation
-    elif st.session_state.current_step == 'confirm_reservation':
-        st.header("Confirm Your Reservation")
-        
-        # Show all details
-        st.subheader("Reservation Details")
-        restaurant = st.session_state.selected_restaurant
-        st.write(f"Restaurant: {restaurant['name']}")
-        st.write(f"Date: {restaurant['date']}")
-        st.write(f"Time: {restaurant['time']}")
-        st.write(f"Party Size: {restaurant['party_size']}")
-        
-        st.subheader("Your Information")
-        st.write(f"Name: {st.session_state.user_info['name']}")
-        st.write(f"Email: {st.session_state.user_info['email']}")
-        st.write(f"Phone: {st.session_state.user_info['phone']}")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("Confirm Reservation"):
-                with st.spinner("Processing your reservation..."):
-                    try:
-                        response = requests.post(
-                            "http://localhost:8000/api/v1/chat",
-                            json={
-                                "message": f"Make reservation at {restaurant['name']} on {restaurant['date']} at {restaurant['time']} for {restaurant['party_size']} people",
-                                "user_info": st.session_state.user_info
-                            },
-                            timeout=10
-                        )
-                        response.raise_for_status()
-                        result = response.json()
-                        
-                        if result and result.get("response"):
-                            st.success(result["response"])
-                            # Reset the flow
-                            st.session_state.current_step = 'explore'
-                            st.session_state.selected_restaurant = None
-                            st.session_state.availability_confirmed = False
-                            st.experimental_rerun()
-                    except Exception as e:
-                        st.error(f"Error making reservation: {str(e)}")
-        with col2:
-            if st.button("Cancel Reservation"):
-                st.session_state.current_step = 'explore'
-                st.session_state.selected_restaurant = None
-                st.session_state.availability_confirmed = False
-                st.experimental_rerun()
+    # User Info Form
+    elif st.session_state.current_step == "user_info":
+        display_user_info_form()
+        return
+    # Confirm Reservation
+    elif st.session_state.current_step == "confirm_reservation":
+        display_confirm_reservation()
+        return
+    # Reservation Form
+    elif st.session_state.current_step == "reservation_form":
+        display_reservation_form()
+        return
+    # Chat input
+    prompt = st.chat_input("Ask about restaurants, deals, or recommendations...")
+    if prompt:
+        st.session_state.chat_history.append({
+            "role": "user",
+            "content": prompt
+        })
+        with st.chat_message("user"):
+            st.write(prompt)
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                response = process_chat_message(prompt)
+                if response:
+                    chat_response = {
+                        "role": "assistant",
+                        "content": response.get("response", "")
+                    }
+                    if "mentioned_restaurant" in response:
+                        chat_response["mentioned_restaurant"] = response["mentioned_restaurant"]
+                    if "recommended_restaurants" in response:
+                        chat_response["recommended_restaurants"] = response["recommended_restaurants"]
+                    st.session_state.chat_history.append(chat_response)
+                    st.rerun()
 
 if __name__ == "__main__":
     main() 
